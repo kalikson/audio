@@ -223,6 +223,13 @@ def main():
     ap.add_argument("--demo-repeats", type=int, default=4,
                     help="Veces que se repite el loop en el archivo demo (default 4)")
     ap.add_argument("--bitrate", default="256k", help="Bitrate del mp3 de salida")
+    ap.add_argument("--strict-max", action="store_true",
+                    help="No permitir que el resultado final supere --max-duration bajo "
+                         "ninguna circunstancia (ni siquiera por el ajuste al pulso). El "
+                         "--overflow se sigue usando para explorar mejores puntos de loop, "
+                         "pero si el mejor punto snapea mas alla de max-duration, se recorta "
+                         "buscando el pulso mas cercano dentro del limite en vez de solo "
+                         "truncar a lo bruto.")
     args = ap.parse_args()
 
     base = os.path.splitext(os.path.basename(args.input))[0]
@@ -267,6 +274,17 @@ def main():
             t1_snapped = t0_snapped + hard_max
         if t1_snapped - t0_snapped < args.min_duration:
             t0_snapped, t1_snapped = t0, t1  # fallback sin snap si el ajuste rompe el rango
+
+        if args.strict_max and (t1_snapped - t0_snapped) > args.max_duration:
+            # recortar buscando el pulso/onset mas cercano dentro del limite duro,
+            # en vez de truncar a lo bruto (eso suele sonar peor en el punto de union)
+            cap_t1 = t0_snapped + args.max_duration
+            mask = (onset_times > cap_t1 - 0.6) & (onset_times <= cap_t1)
+            idxs = np.where(mask)[0]
+            if len(idxs):
+                t1_snapped = float(onset_times[idxs[np.argmax(onset_env[idxs])]])
+            else:
+                t1_snapped = cap_t1
 
         print(f"    -> inicio={t0_snapped:.2f}s  fin={t1_snapped:.2f}s  "
               f"duracion={t1_snapped - t0_snapped:.2f}s  similitud={sim:.3f}",

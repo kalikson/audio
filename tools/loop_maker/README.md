@@ -43,6 +43,14 @@ Esto genera, junto al archivo de entrada (o en `--outdir`):
 - `--xfade 0.10` duracion del crossfade (segundos) en el punto de union.
 - `--demo-repeats 4` cuantas veces se repite el loop en el archivo demo.
 - `--bitrate 256k` bitrate del mp3 de salida.
+- `--strict-max` si el usuario pide explicitamente "que no pase de X segundos",
+  usa esta bandera: garantiza que el resultado final nunca supere
+  `--max-duration`, incluso si el ajuste al pulso lo hubiera cruzado un poco.
+  En vez de truncar a lo bruto, busca el pulso/onset mas cercano dentro del
+  limite para que el corte siga cayendo en un buen punto musical. Sin esta
+  bandera, `--overflow` puede dejar pasar el resultado unos segundos de mas
+  cuando vale la pena (esto es lo que uso por defecto para no forzar peor
+  calidad, pero si el usuario fue explicito con el limite, usar `--strict-max`).
 
 ## Como funciona (resumen del metodo)
 
@@ -114,3 +122,21 @@ fino se calculen ahi.
 - Si el genero tiene mucho rubato o cambios de tempo, el beat tracking
   puede fallar; en ese caso el snap a onset sigue funcionando razonablemente
   porque no depende de una grilla de tempo fija.
+- No acortar de mas solo porque la similitud es mas alta: si el usuario ya
+  confirmo que una seccion mas larga (ej. 21s) es "el coro" completo, un
+  fragmento mas corto (ej. 10s) puede tener mejor similitud de croma pero
+  cortar la frase musical/lirica a la mitad — suena como si faltara parte
+  de la cancion. Ante la duda, preferir la duracion que el usuario ya
+  valido en vez de perseguir el numero de similitud mas alto.
+- Si el usuario da un minutaje exacto ("hazlo de 1:30 a 1:49"), usar esos
+  tiempos directamente (solo con `snap_to_onset` para no cortar a mitad de
+  una palabra/nota) en vez de dejar que la busqueda automatica reubique el
+  punto de inicio — el usuario ya identifico el lugar correcto por oido.
+- Si el usuario sube un clip corto que ya es un extracto/ejemplo de la
+  seccion que quiere loopear (por ejemplo, un "mix" de menos de 90s), acotar
+  `--search-start`/`--search-end` a casi todo el clip (los defaults de 10%-95%
+  igual funcionan bien) — suelen tener una similitud casi perfecta (~1.0)
+  porque ya es la seccion repetida que se busca.
+- Si el usuario pide explicitamente un limite estricto ("que no pase de
+  30 segundos"), usar `--strict-max` para garantizar que el resultado nunca
+  lo supere, en vez de dejar que `--overflow` lo deje pasar unos segundos.
