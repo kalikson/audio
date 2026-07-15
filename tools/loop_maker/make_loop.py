@@ -26,7 +26,9 @@ Metodo:
      hacia el primer sample del loop de forma identica a como fluye en la
      grabacion original, eliminando el click/salto de amplitud del corte.
   7. Exportar:
-       - <nombre>_loop.mp3   -> el loop final (<= max_duration segundos).
+       - <nombre>_loop.mp3   -> el loop final (<= max_duration segundos, o
+         hasta max_duration+overflow si el punto de repeticion natural
+         realmente cae un poco mas alla).
        - <nombre>_demo_x4.mp3 -> el mismo loop repetido N veces seguidas,
          para verificar de oido que el corte no se nota.
 
@@ -72,9 +74,10 @@ def analyze(y, sr, hop_length=512):
 
 def find_best_repeat(chroma, times, rms, min_duration, max_duration,
                       search_start, search_end, energy_weight,
-                      length_weight=0.35, coarse_step=0.25, cmp_window=3.0):
+                      length_weight=0.35, overflow=0.0, overflow_penalty=0.03,
+                      coarse_step=0.25, cmp_window=3.0):
     """Busca (t0, lag) que maximice similitud de croma entre [t0,t0+w] y
-    [t0+lag, t0+lag+w], con min_duration <= lag <= max_duration.
+    [t0+lag, t0+lag+w], con min_duration <= lag <= max_duration (+ overflow).
 
     length_weight favorece loops mas cercanos a max_duration (aprovechar el
     presupuesto de segundos disponible) en vez de quedarse siempre con el
@@ -82,13 +85,19 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
     mayor. energy_weight favorece secciones mas fuertes/llenas (coro vs
     estrofa). Ambos se suman como bonus pequenos sobre la similitud, para
     que solo desempaten entre candidatos ya parecidos y nunca prefieran una
-    repeticion claramente peor solo por ser mas larga o mas fuerte."""
+    repeticion claramente peor solo por ser mas larga o mas fuerte.
+
+    overflow permite que el loop cruce max_duration hasta en `overflow`
+    segundos extra, pero solo si el punto de repeticion natural cae ahi:
+    cada segundo de overflow usado resta `overflow_penalty` al score, asi
+    que solo se cruza la linea cuando la similitud realmente lo justifica."""
     sr_frame = times[1] - times[0] if len(times) > 1 else 0.02
     w_frames = max(1, int(cmp_window / sr_frame))
     dur = times[-1]
-    search_end = min(search_end, dur - max_duration - cmp_window)
+    hard_max = max_duration + overflow
+    search_end = min(search_end, dur - hard_max - cmp_window)
     if search_end <= search_start:
-        search_end = max(search_start, dur - max_duration - cmp_window)
+        search_end = max(search_start, dur - hard_max - cmp_window)
 
     rms_norm = rms / (rms.max() + 1e-9)
 
@@ -105,14 +114,15 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
         na = np.linalg.norm(a)
         energy_bonus = energy_weight * 0.05 * rms_norm[min(f0, len(rms_norm) - 1)]
         lag = min_duration
-        while lag <= max_duration:
+        while lag <= hard_max:
             f1 = frame_at(t0 + lag)
             if f1 + w_frames >= chroma.shape[1]:
                 break
             b = chroma[:, f1:f1 + w_frames]
             sim = float(np.sum(a * b) / (na * np.linalg.norm(b) + 1e-9))
-            length_bonus = length_weight * 0.05 * (lag - min_duration) / max(1e-9, (max_duration - min_duration))
-            score = sim + energy_bonus + length_bonus
+            length_bonus = length_weight * 0.05 * (min(lag, max_duration) - min_duration) / max(1e-9, (max_duration - min_duration))
+            over_amount = max(0.0, lag - max_duration)
+            score = sim + energy_bonus + length_bonus - overflow_penalty * over_amount
             if best is None or score > best[0]:
                 best = (score, sim, t0, lag)
             lag += coarse_step
@@ -121,7 +131,7 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
     return best  # (score, sim, t0, lag)
 
 
-def refine_local(chroma, times, t0_guess, lag_guess, min_duration, max_duration,
+def refine_local(chroma, times, t0_guess, lag_guess, min_duration, hard_max,
                   window=1.5, step=0.02, cmp_window=1.5):
     sr_frame = times[1] - times[0] if len(times) > 1 else 0.02
     w_frames = max(1, int(cmp_window / sr_frame))
@@ -137,7 +147,7 @@ def refine_local(chroma, times, t0_guess, lag_guess, min_duration, max_duration,
         a = chroma[:, f0:f0 + w_frames]
         na = np.linalg.norm(a)
         for lag in np.arange(max(min_duration, lag_guess - window),
-                              min(max_duration, lag_guess + window), step):
+                              min(hard_max, lag_guess + window), step):
             f1 = frame_at(t0 + lag)
             if f1 + w_frames >= chroma.shape[1]:
                 continue
@@ -193,8 +203,12 @@ def main():
     ap.add_argument("--outdir", default=None, help="Carpeta de salida (default: junto al input)")
     ap.add_argument("--max-duration", type=float, default=30.0,
                     help="Duracion maxima del loop en segundos (default 30)")
-    ap.add_argument("--min-duration", type=float, default=12.0,
-                    help="Duracion minima del loop en segundos (default 12)")
+    ap.add_argument("--min-duration", type=float, default=21.0,
+                    help="Duracion minima del loop en segundos (default 21)")
+    ap.add_argument("--overflow", type=float, default=5.0,
+                    help="Segundos extra que se permite cruzar max-duration si el punto de "
+                         "repeticion natural realmente cae ahi (default 5, o sea hasta 35s "
+                         "con max-duration=30). Se usa poco: solo si vale la pena la similitud.")
     ap.add_argument("--search-start", type=float, default=None,
                     help="Segundo desde donde buscar el coro (default: 10%% de la cancion)")
     ap.add_argument("--search-end", type=float, default=None,
@@ -228,13 +242,15 @@ def main():
         search_start = args.search_start if args.search_start is not None else 0.10 * dur
         search_end = args.search_end if args.search_end is not None else 0.95 * dur
 
+        hard_max = args.max_duration + args.overflow
         print(f"[3/5] Buscando la mejor seccion repetida entre "
               f"{search_start:.1f}s y {search_end:.1f}s "
-              f"(duracion candidata {args.min_duration:.0f}-{args.max_duration:.0f}s)...",
+              f"(duracion candidata {args.min_duration:.0f}-{args.max_duration:.0f}s, "
+              f"hasta {hard_max:.0f}s si realmente vale la pena)...",
               file=sys.stderr)
         coarse = find_best_repeat(chroma, times, rms, args.min_duration, args.max_duration,
                                    search_start, search_end, args.energy_weight,
-                                   args.length_weight)
+                                   args.length_weight, args.overflow)
         if coarse is None:
             print("No se encontro una seccion candidata; prueba ajustando "
                   "--search-start/--search-end o --min-duration.", file=sys.stderr)
@@ -242,13 +258,13 @@ def main():
         _, _, t0_guess, lag_guess = coarse
 
         sim, t0, lag = refine_local(chroma, times, t0_guess, lag_guess,
-                                     args.min_duration, args.max_duration)
+                                     args.min_duration, hard_max)
         t1 = t0 + lag
 
         t0_snapped = snap_to_onset(t0, onset_env, onset_times)
         t1_snapped = snap_to_onset(t1, onset_env, onset_times)
-        if t1_snapped - t0_snapped > args.max_duration:
-            t1_snapped = t0_snapped + args.max_duration
+        if t1_snapped - t0_snapped > hard_max:
+            t1_snapped = t0_snapped + hard_max
         if t1_snapped - t0_snapped < args.min_duration:
             t0_snapped, t1_snapped = t0, t1  # fallback sin snap si el ajuste rompe el rango
 
