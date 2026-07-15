@@ -79,7 +79,10 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
     length_weight favorece loops mas cercanos a max_duration (aprovechar el
     presupuesto de segundos disponible) en vez de quedarse siempre con el
     fragmento repetido mas corto solo por tener una similitud levemente
-    mayor."""
+    mayor. energy_weight favorece secciones mas fuertes/llenas (coro vs
+    estrofa). Ambos se suman como bonus pequenos sobre la similitud, para
+    que solo desempaten entre candidatos ya parecidos y nunca prefieran una
+    repeticion claramente peor solo por ser mas larga o mas fuerte."""
     sr_frame = times[1] - times[0] if len(times) > 1 else 0.02
     w_frames = max(1, int(cmp_window / sr_frame))
     dur = times[-1]
@@ -100,7 +103,7 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
             break
         a = chroma[:, f0:f0 + w_frames]
         na = np.linalg.norm(a)
-        energy_bonus = 0.6 + energy_weight * rms_norm[min(f0, len(rms_norm) - 1)]
+        energy_bonus = energy_weight * 0.05 * rms_norm[min(f0, len(rms_norm) - 1)]
         lag = min_duration
         while lag <= max_duration:
             f1 = frame_at(t0 + lag)
@@ -108,8 +111,8 @@ def find_best_repeat(chroma, times, rms, min_duration, max_duration,
                 break
             b = chroma[:, f1:f1 + w_frames]
             sim = float(np.sum(a * b) / (na * np.linalg.norm(b) + 1e-9))
-            length_bonus = (1 - length_weight) + length_weight * (lag / max_duration)
-            score = sim * energy_bonus * length_bonus
+            length_bonus = length_weight * 0.05 * (lag - min_duration) / max(1e-9, (max_duration - min_duration))
+            score = sim + energy_bonus + length_bonus
             if best is None or score > best[0]:
                 best = (score, sim, t0, lag)
             lag += coarse_step
